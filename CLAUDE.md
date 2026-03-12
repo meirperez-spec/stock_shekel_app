@@ -2,35 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Running the Agent
+## Setup
+
+Requires an `ANTHROPIC_API_KEY` in a `.env` file inside `stock_agent/`.
 
 ```bash
+cd stock_agent
 pip install -r requirements.txt
-cp .env.txt .env   # fill in ANTHROPIC_API_KEY, then add .env to .gitignore
+```
+
+## Running
+
+**CLI (interactive loop):**
+```bash
+cd stock_agent
 python main.py
 ```
 
-The agent runs in an infinite loop. Stop with `Ctrl+C`.
-
-## Configuration (.env)
-
-| Variable | Default | Description |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | (required) | Anthropic API key |
-| `STOCKS` | `AAPL,GOOGL,MSFT,TSLA,AMZN` | Comma-separated tickers |
-| `CHECK_INTERVAL` | `3600` | Seconds between analysis runs |
+**Web server (FastAPI + static UI):**
+```bash
+cd stock_agent
+uvicorn api:app --reload
+```
+The web UI is served at `/` and the API endpoint is `POST /api/query` with `{"query": "..."}`.
 
 ## Architecture
 
-**LangGraph loop:** `fetch_prices → analyze_stocks → report → wait → (repeat)`
+A LangGraph-based stock purchase calculator. Takes natural language input (e.g., "I want to buy Tesla with 3000 shekels") and returns how many shares can be purchased.
 
-- **`config.py`** — Loads env vars; imported by all other modules.
-- **`stock_data.py`** — `fetch_stock_data(ticker)` calls yfinance for price, SMA20/50, RSI-14, 52W range, volume, P/E. `format_stock_summary()` renders it as a plain-text string for the LLM prompt.
-- **`agent.py`** — Defines `AgentState` (TypedDict), four graph nodes, and `build_graph()`. The LLM (`claude-sonnet-4-6`) is instantiated at module level. Claude's response must follow a strict `RECOMMENDATION / CONFIDENCE / REASONING` format; `_parse_field()` extracts each line.
-- **`main.py`** — Validates API key, constructs initial state, calls `graph.invoke()`.
+**Data flow:** `parse_input` → `convert_currency` → `get_stock_price` → `calculate_shares` → `format_response`
 
-## Key Patterns
+- **`state.py`** — `AgentState` TypedDict: the single shared state object flowing through all nodes
+- **`graph.py`** — Builds the `StateGraph`; `_route(next_node)` checks `state["error"]` after each node and short-circuits to `format_response` on any failure
+- **`nodes.py`** — Five processing nodes: Claude Sonnet 4.6 parses free-text to JSON; open.er-api.com fetches ILS→USD rate; yfinance fetches stock price
+- **`main.py`** — CLI entry point; initializes the full `AgentState` dict before each `graph.invoke()` call
+- **`api.py`** — FastAPI server; graph is compiled once at startup via `lifespan`; serves `static/index.html` as the web UI
+- **`static/index.html`** — Single-page frontend that calls `POST /api/query`
 
-- **State immutability:** Each node returns `{**state, ...updated_fields}` — never mutates state in place.
-- **Error handling per ticker:** Errors from yfinance are caught per-ticker and stored as `{"ticker": ..., "error": ...}` dicts; downstream nodes check for the `"error"` key and skip LLM calls for failed tickers.
-- **LLM response parsing:** `_parse_field(raw, "FIELD")` scans lines for `FIELD:` prefix — fragile to format deviations. If Claude doesn't follow the exact format, fields return `"N/A"`.
+**Error handling pattern:** Every node returns either its result fields or `{"error": "..."}`. The `_route()` closure in `graph.py` detects errors and bypasses remaining nodes, routing directly to `format_response`.
